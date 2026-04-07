@@ -21,29 +21,34 @@ SALES_FILE = DATA_DIR / "sales.json"
 EXPENSES_FILE = DATA_DIR / "expenses.json"
 INVENTORY_FILE = DATA_DIR / "inventory.json"
 
-
 def load_json(path, default):
     if path.exists():
         with open(path) as f:
             return json.load(f)
     return default
 
-
 def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=2, default=str)
 
-
 # ── Helper Functions ──────────────────────────────────────────────────────────
 def fmt(n):
-    """Format number as TZS currency"""
+    """Format number as TZS currency with 2 decimal places and commas"""
     try:
         if pd.isna(n) or n is None:
-            return "TZS 0"
-        return f"TZS {float(n):,.0f}"
+            return "TZS 0.00"
+        return f"TZS {float(n)::,.2f}"
     except (ValueError, TypeError):
         return str(n)
 
+def fmt_price_only(n):
+    """Format price only (without TZS prefix) with commas and 2 decimals"""
+    try:
+        if pd.isna(n) or n is None:
+            return "0.00"
+        return f"{float(n)::,.2f}"
+    except (ValueError, TypeError):
+        return str(n)
 
 def safe_float(value, default=0):
     """Safely convert to float, handling NaN, None, and Series"""
@@ -60,7 +65,6 @@ def safe_float(value, default=0):
     except (ValueError, TypeError, AttributeError):
         return default
 
-
 def safe_int(value, default=0):
     """Safely convert to int, handling NaN and None"""
     try:
@@ -70,13 +74,11 @@ def safe_int(value, default=0):
     except (ValueError, TypeError):
         return default
 
-
 def get_records_by_date(records, target_date):
     """Filter records by specific date"""
     if not records:
         return []
     return [r for r in records if r.get("date", "") == str(target_date)]
-
 
 def get_records_by_month(records, year, month):
     """Filter records by month/year"""
@@ -92,7 +94,6 @@ def get_records_by_month(records, year, month):
             continue
     return result
 
-
 def get_records_by_date_range(records, start_date, end_date):
     """Filter records by date range"""
     if not records:
@@ -107,7 +108,6 @@ def get_records_by_date_range(records, start_date, end_date):
             continue
     return result
 
-
 # ── Load Excel master data ────────────────────────────────────────────────────
 @st.cache_data
 def load_master_data():
@@ -118,78 +118,80 @@ def load_master_data():
         "Zawadi's Kitchenwares.xlsx",
         "Zawadis_Kitchenwares.xlsx"
     ]
-
+    
     excel_file = None
     for filename in possible_filenames:
         if os.path.exists(filename):
             excel_file = filename
             break
-
+    
     if excel_file is None:
         st.error("❌ Could not find the Excel data file. Please ensure the Excel file is in the app directory.")
         st.stop()
-
+    
     try:
         xl = pd.read_excel(excel_file, sheet_name=None)
-
+        
         if "Master" not in xl:
             st.error("❌ Sheet 'Master' not found in the Excel file")
             st.stop()
         if "Single Master" not in xl:
             st.error("❌ Sheet 'Single Master' not found in the Excel file")
             st.stop()
-
+        
         master = xl["Master"].copy()
         master = master[master["ITEM"].notna()]
         master = master[master["ITEM"].astype(str).str.strip() != ""]
         master = master[master["ITEM"].astype(str).str.strip() != "nan"]
         master = master.reset_index(drop=True)
-
+        
         single = xl["Single Master"].copy()
         single = single[single["ITEM"].notna()]
         single = single[single["ITEM"].astype(str).str.strip() != ""]
         single = single[single["ITEM"].astype(str).str.strip() != "nan"]
         single = single.reset_index(drop=True)
-
+        
         master["DATE"] = master["DATE"].ffill()
         master["VENDOR"] = master["VENDOR"].ffill()
         single["DATE"] = single["DATE"].ffill()
         single["VENDOR"] = single["VENDOR"].ffill()
-
+        
         return master, single
-
+    
     except Exception as e:
         st.error(f"❌ Error reading Excel file: {str(e)}")
         st.stop()
 
-
 # Load the data
 master_df, single_df = load_master_data()
-
 
 # ── Build inventory from Excel + saved overrides ──────────────────────────────
 @st.cache_data(ttl=60)
 def build_inventory():
     saved = load_json(INVENTORY_FILE, {})
     rows = []
-
+    
     for _, r in master_df.iterrows():
         name = str(r["ITEM"]).strip()
         if not name or name == "nan":
             continue
-
+            
         cartons = safe_float(r.get("CTN(S)", 0))
         pcs_per_carton = safe_float(r.get("PCS/CARTON", 0))
         total_pcs = safe_int(cartons * pcs_per_carton)
-
+        
+        # CRITICAL CHANGE: Stock Remaining determines Total Pcs
         stock = saved.get(name, {}).get("stock", total_pcs)
         threshold = saved.get(name, {}).get("threshold", 12)
-
+        
+        # Total Pcs now equals Stock Remaining (not the original calculation)
+        total_pcs = stock  # <-- CHANGE HERE: Total Pcs follows Stock Remaining
+        
         buy_price = safe_float(r.get("BUYING PRICE/CARTON", 0))
         sell_half_doz = safe_float(r.get("1/2 Doz S.P", 0))
         sell_one_doz = safe_float(r.get("1 Doz S.P", 0))
         profit_doz = safe_float(r.get("PROFIT/Doz", 0))
-
+        
         rows.append({
             "Item": name, "Type": "Dozen",
             "Vendor": str(r.get("VENDOR", "")) if pd.notna(r.get("VENDOR")) else "",
@@ -201,23 +203,27 @@ def build_inventory():
             "Profit/Doz (TZS)": profit_doz,
             "Low Stock Threshold": threshold,
         })
-
+    
     for _, r in single_df.iterrows():
         name = str(r["ITEM"]).strip()
         if not name or name == "nan":
             continue
-
+            
         cartons = safe_float(r.get("CTN(S)", 0))
         pcs_per_carton = safe_float(r.get("PCS/CARTON", 0))
         total_pcs = safe_int(cartons * pcs_per_carton)
-
+        
+        # CRITICAL CHANGE: Stock Remaining determines Total Pcs
         stock = saved.get(name, {}).get("stock", total_pcs)
         threshold = saved.get(name, {}).get("threshold", 5)
-
+        
+        # Total Pcs now equals Stock Remaining
+        total_pcs = stock  # <-- CHANGE HERE: Total Pcs follows Stock Remaining
+        
         buy_price = safe_float(r.get("BUYING PRICE/CARTON", 0))
         sell_price_unit = safe_float(r.get("1 Item S.Price", 0))
         profit_unit = safe_float(r.get("PROFIT/Unit", 0))
-
+        
         rows.append({
             "Item": name, "Type": "Single",
             "Vendor": str(r.get("VENDOR", "")) if pd.notna(r.get("VENDOR")) else "",
@@ -230,9 +236,8 @@ def build_inventory():
             "Profit/Unit (TZS)": profit_unit,
             "Low Stock Threshold": threshold,
         })
-
+    
     return rows
-
 
 def update_stock(item_name, qty_sold):
     saved = load_json(INVENTORY_FILE, {})
@@ -246,7 +251,6 @@ def update_stock(item_name, qty_sold):
     save_json(INVENTORY_FILE, saved)
     st.cache_data.clear()
 
-
 def delete_sale_by_index(index):
     sales = load_json(SALES_FILE, [])
     if 0 <= index < len(sales):
@@ -254,7 +258,6 @@ def delete_sale_by_index(index):
         save_json(SALES_FILE, sales)
         return deleted
     return None
-
 
 def delete_expense_by_index(index):
     expenses = load_json(EXPENSES_FILE, [])
@@ -264,7 +267,6 @@ def delete_expense_by_index(index):
         return deleted
     return None
 
-
 def update_sale(index, updated_sale):
     sales = load_json(SALES_FILE, [])
     if 0 <= index < len(sales):
@@ -272,7 +274,6 @@ def update_sale(index, updated_sale):
         save_json(SALES_FILE, sales)
         return True
     return False
-
 
 def update_expense(index, updated_expense):
     expenses = load_json(EXPENSES_FILE, [])
@@ -282,22 +283,18 @@ def update_expense(index, updated_expense):
         return True
     return False
 
-
 def delete_all_sales():
     save_json(SALES_FILE, [])
     return True
-
 
 def delete_all_expenses():
     save_json(EXPENSES_FILE, [])
     return True
 
-
 def delete_all_inventory_overrides():
     save_json(INVENTORY_FILE, {})
     st.cache_data.clear()
     return True
-
 
 # ── Sidebar navigation ────────────────────────────────────────────────────────
 st.sidebar.image("https://em-content.zobj.net/source/twitter/376/fork-and-knife-with-plate_1f37d-fe0f.png", width=60)
@@ -350,8 +347,7 @@ if page == "🏠 Dashboard":
         st.subheader("⚠️ Low Stock Alerts")
         if low_stock_items:
             for item in low_stock_items[:10]:
-                st.error(
-                    f"**{item['Item']}** — {item['Stock Remaining']} pcs left (threshold: {item['Low Stock Threshold']})")
+                st.error(f"**{item['Item']}** — {item['Stock Remaining']} pcs left (threshold: {item['Low Stock Threshold']})")
         else:
             st.success("All items are sufficiently stocked ✅")
 
@@ -385,16 +381,19 @@ elif page == "📦 Inventory":
         if search:
             df = df[df["Item"].str.contains(search, case=False)]
 
-
         def highlight_low(row):
             color = "background-color: #ffe6e6" if row["Stock Remaining"] <= row["Low Stock Threshold"] else ""
             return [color] * len(row)
 
-
         display_cols = ["Item", "Type", "Vendor", "Total Pcs", "Stock Remaining",
                         "Low Stock Threshold", "Buy Price/Carton (TZS)"]
+        
+        # Format the price column for display
+        display_df = df[display_cols].copy()
+        display_df["Buy Price/Carton (TZS)"] = display_df["Buy Price/Carton (TZS)"].apply(fmt_price_only)
+        
         st.dataframe(
-            df[display_cols].style.apply(highlight_low, axis=1),
+            display_df.style.apply(highlight_low, axis=1),
             use_container_width=True, hide_index=True
         )
         st.caption("🔴 Red rows = stock at or below threshold")
@@ -402,8 +401,8 @@ elif page == "📦 Inventory":
     with tab2:
         low = [i for i in inv if i["Stock Remaining"] <= i["Low Stock Threshold"]]
         if low:
-            st.dataframe(pd.DataFrame(low)[["Item", "Type", "Vendor", "Stock Remaining", "Low Stock Threshold"]],
-                         use_container_width=True, hide_index=True)
+            low_df = pd.DataFrame(low)[["Item", "Type", "Vendor", "Stock Remaining", "Low Stock Threshold"]]
+            st.dataframe(low_df, use_container_width=True, hide_index=True)
         else:
             st.success("No low stock items right now ✅")
 
@@ -447,10 +446,11 @@ elif page == "🛒 Purchases Ledger":
                               "BUYING PRICE/CARTON", "1 Doz S.P", "PROFIT/Doz", "Profit/Carton"]].copy()
             disp.columns = ["Date", "Vendor", "Item", "Cartons", "Pcs/Carton",
                             "Buy Price/Carton", "Sell 1 Doz", "Profit/Doz", "Profit/Carton"]
-
+            
+            # Format prices with commas and 2 decimals
             for col in ["Buy Price/Carton", "Sell 1 Doz", "Profit/Doz", "Profit/Carton"]:
-                disp[col] = disp[col].apply(lambda x: f"{safe_float(x):,.0f}" if safe_float(x) > 0 else "-")
-
+                disp[col] = disp[col].apply(lambda x: fmt_price_only(safe_float(x)) if safe_float(x) > 0 else "-")
+            
             st.dataframe(disp, use_container_width=True, hide_index=True)
 
             total_spent = 0
@@ -458,7 +458,7 @@ elif page == "🛒 Purchases Ledger":
                 price = safe_float(row.get("BUYING PRICE/CARTON", 0))
                 cartons = safe_float(row.get("CTN(S)", 0))
                 total_spent += price * cartons
-
+            
             st.info(f"**Total spent on dozen stock: {fmt(total_spent)}**")
         else:
             st.info("No dozen items found")
@@ -469,10 +469,11 @@ elif page == "🛒 Purchases Ledger":
                                "BUYING PRICE/CARTON", "1 Item S.Price", "PROFIT/Unit", "Profit/Carton"]].copy()
             disp2.columns = ["Date", "Vendor", "Item", "Cartons", "Pcs/Carton",
                              "Buy Price/Carton", "Sell Price/Unit", "Profit/Unit", "Profit/Carton"]
-
+            
+            # Format prices with commas and 2 decimals
             for col in ["Buy Price/Carton", "Sell Price/Unit", "Profit/Unit", "Profit/Carton"]:
-                disp2[col] = disp2[col].apply(lambda x: f"{safe_float(x):,.0f}" if safe_float(x) > 0 else "-")
-
+                disp2[col] = disp2[col].apply(lambda x: fmt_price_only(safe_float(x)) if safe_float(x) > 0 else "-")
+            
             st.dataframe(disp2, use_container_width=True, hide_index=True)
 
             total_spent2 = 0
@@ -480,7 +481,7 @@ elif page == "🛒 Purchases Ledger":
                 price = safe_float(row.get("BUYING PRICE/CARTON", 0))
                 cartons = safe_float(row.get("CTN(S)", 0))
                 total_spent2 += price * cartons
-
+            
             st.info(f"**Total spent on single stock: {fmt(total_spent2)}**")
         else:
             st.info("No single items found")
@@ -490,7 +491,7 @@ elif page == "🛒 Purchases Ledger":
         grand_total += safe_float(row.get("BUYING PRICE/CARTON", 0)) * safe_float(row.get("CTN(S)", 0))
     for idx, row in single_df.iterrows():
         grand_total += safe_float(row.get("BUYING PRICE/CARTON", 0)) * safe_float(row.get("CTN(S)", 0))
-
+    
     st.success(f"### 💰 Grand Total Purchases: {fmt(grand_total)}")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -579,24 +580,22 @@ elif page == "💰 Sales Ledger":
 
     # ── View, Edit, Delete Sales ───────────────────────────────────────────────
     st.subheader("📋 Sales Records")
-
+    
     if sales:
         # Date filters
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
-            view_option = st.selectbox("View by", ["All Records", "Specific Date", "Date Range", "Month/Year"],
-                                       key="sales_view_option")
-
+            view_option = st.selectbox("View by", ["All Records", "Specific Date", "Date Range", "Month/Year"], key="sales_view_option")
+        
         filtered_sales = sales.copy()
-
+        
         if view_option == "Specific Date":
             with col_f2:
                 target_date = st.date_input("Select Date", value=date.today(), key="sales_target_date")
             filtered_sales = get_records_by_date(sales, target_date)
         elif view_option == "Date Range":
             with col_f2:
-                start_date = st.date_input("Start Date", value=date.today() - timedelta(days=30),
-                                           key="sales_start_date")
+                start_date = st.date_input("Start Date", value=date.today() - timedelta(days=30), key="sales_start_date")
             with col_f3:
                 end_date = st.date_input("End Date", value=date.today(), key="sales_end_date")
             filtered_sales = get_records_by_date_range(sales, start_date, end_date)
@@ -604,17 +603,16 @@ elif page == "💰 Sales Ledger":
             with col_f2:
                 selected_month = st.selectbox("Month", range(1, 13), index=date.today().month - 1, key="sales_month")
             with col_f3:
-                selected_year = st.number_input("Year", min_value=2020, max_value=2030, value=date.today().year,
-                                                key="sales_year")
+                selected_year = st.number_input("Year", min_value=2020, max_value=2030, value=date.today().year, key="sales_year")
             filtered_sales = get_records_by_month(sales, selected_year, selected_month)
-
+        
         if filtered_sales:
             df = pd.DataFrame(filtered_sales)
             df["display_date"] = pd.to_datetime(df["date"]).dt.strftime("%d %b %Y")
-
+            
             # Display with selection for edit/delete
             st.write(f"**Found {len(filtered_sales)} records**")
-
+            
             # Create a selectable table
             for idx, row in df.iterrows():
                 with st.container():
@@ -638,7 +636,7 @@ elif page == "💰 Sales Ledger":
                                 st.success("Sale deleted successfully!")
                                 st.rerun()
                     st.divider()
-
+            
             # Edit form
             if "edit_sale_idx" in st.session_state:
                 st.subheader("✏️ Edit Sale Record")
@@ -652,12 +650,12 @@ elif page == "💰 Sales Ledger":
                     with col2:
                         new_unit_price = st.number_input("Unit Price", value=float(edit_data["unit_price"]))
                         new_customer = st.text_input("Customer", value=edit_data.get("customer", ""))
-
+                    
                     if st.form_submit_button("💾 Save Changes"):
                         # Recalculate totals
                         new_total = new_unit_price * new_quantity
                         new_profit = float(edit_data["unit_profit"]) * new_quantity
-
+                        
                         updated_entry = edit_data.copy()
                         updated_entry["date"] = str(new_date)
                         updated_entry["item"] = new_item
@@ -667,17 +665,17 @@ elif page == "💰 Sales Ledger":
                         updated_entry["profit"] = new_profit
                         updated_entry["customer"] = new_customer
                         updated_entry["qty_label"] = f"{new_quantity} × {edit_data['sell_mode']}"
-
+                        
                         original_idx = sales.index(edit_data)
                         if update_sale(original_idx, updated_entry):
                             st.success("Sale updated successfully!")
                             del st.session_state.edit_sale_idx
                             st.rerun()
-
+                
                 if st.button("Cancel Edit", key="cancel_sale_edit"):
                     del st.session_state.edit_sale_idx
                     st.rerun()
-
+            
             # Summary metrics
             c1, c2, c3 = st.columns(3)
             c1.metric("Total Revenue", fmt(df["total_price"].sum()))
@@ -726,16 +724,15 @@ elif page == "💸 Expenses":
 
     # ── View, Edit, Delete Expenses ───────────────────────────────────────────
     st.subheader("📋 Expense Records")
-
+    
     if expenses:
         # Date filters
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
-            view_option = st.selectbox("View by", ["All Records", "Specific Date", "Date Range", "Month/Year"],
-                                       key="exp_view_option")
-
+            view_option = st.selectbox("View by", ["All Records", "Specific Date", "Date Range", "Month/Year"], key="exp_view_option")
+        
         filtered_expenses = expenses.copy()
-
+        
         if view_option == "Specific Date":
             with col_f2:
                 target_date = st.date_input("Select Date", value=date.today(), key="exp_target_date")
@@ -750,16 +747,15 @@ elif page == "💸 Expenses":
             with col_f2:
                 selected_month = st.selectbox("Month", range(1, 13), index=date.today().month - 1, key="exp_month")
             with col_f3:
-                selected_year = st.number_input("Year", min_value=2020, max_value=2030, value=date.today().year,
-                                                key="exp_year")
+                selected_year = st.number_input("Year", min_value=2020, max_value=2030, value=date.today().year, key="exp_year")
             filtered_expenses = get_records_by_month(expenses, selected_year, selected_month)
-
+        
         if filtered_expenses:
             df = pd.DataFrame(filtered_expenses)
             df["display_date"] = pd.to_datetime(df["date"]).dt.strftime("%d %b %Y")
-
+            
             st.write(f"**Found {len(filtered_expenses)} records**")
-
+            
             # Display with edit/delete options
             for idx, row in df.iterrows():
                 with st.container():
@@ -783,7 +779,7 @@ elif page == "💸 Expenses":
                                 st.success("Expense deleted successfully!")
                                 st.rerun()
                     st.divider()
-
+            
             # Edit form
             if "edit_exp_idx" in st.session_state:
                 st.subheader("✏️ Edit Expense Record")
@@ -792,29 +788,28 @@ elif page == "💸 Expenses":
                     col1, col2 = st.columns(2)
                     with col1:
                         new_date = st.date_input("Date", value=datetime.strptime(edit_data["date"], "%Y-%m-%d").date())
-                        new_category = st.selectbox("Category", CATEGORIES,
-                                                    index=CATEGORIES.index(edit_data["category"]))
+                        new_category = st.selectbox("Category", CATEGORIES, index=CATEGORIES.index(edit_data["category"]))
                     with col2:
                         new_amount = st.number_input("Amount (TZS)", value=float(edit_data["amount"]))
                         new_description = st.text_input("Description", value=edit_data.get("description", ""))
-
+                    
                     if st.form_submit_button("💾 Save Changes"):
                         updated_entry = edit_data.copy()
                         updated_entry["date"] = str(new_date)
                         updated_entry["category"] = new_category
                         updated_entry["amount"] = new_amount
                         updated_entry["description"] = new_description
-
+                        
                         original_idx = expenses.index(edit_data)
                         if update_expense(original_idx, updated_entry):
                             st.success("Expense updated successfully!")
                             del st.session_state.edit_exp_idx
                             st.rerun()
-
+                
                 if st.button("Cancel Edit", key="cancel_exp_edit"):
                     del st.session_state.edit_exp_idx
                     st.rerun()
-
+            
             st.metric("Total Expenses", fmt(df["amount"].astype(float).sum()))
         else:
             st.info("No expense records found for the selected date range")
@@ -837,10 +832,10 @@ elif page == "📊 Profit & Summary":
         start_date = st.date_input("From Date", value=date.today() - timedelta(days=30), key="profit_start_date")
     with col2:
         end_date = st.date_input("To Date", value=date.today(), key="profit_end_date")
-
+    
     filtered_sales = get_records_by_date_range(sales, start_date, end_date)
     filtered_expenses = get_records_by_date_range(expenses, start_date, end_date)
-
+    
     sales_df = pd.DataFrame(filtered_sales) if filtered_sales else pd.DataFrame()
     expenses_df = pd.DataFrame(filtered_expenses) if filtered_expenses else pd.DataFrame()
 
@@ -857,14 +852,14 @@ elif page == "📊 Profit & Summary":
                 price = safe_float(row.get("BUYING PRICE/CARTON", 0))
                 cartons = safe_float(row.get("CTN(S)", 0))
                 master_buying += price * cartons
-
+        
         single_buying = 0
         if not single_df.empty:
             for idx, row in single_df.iterrows():
                 price = safe_float(row.get("BUYING PRICE/CARTON", 0))
                 cartons = safe_float(row.get("CTN(S)", 0))
                 single_buying += price * cartons
-
+        
         purchase_cost = master_buying + single_buying
     except Exception as e:
         purchase_cost = 0
@@ -892,7 +887,7 @@ elif page == "📊 Profit & Summary":
         ).reset_index().sort_values("Total_Profit", ascending=False)
         item_summary.columns = ["Item", "Revenue (TZS)", "Profit (TZS)", "Transactions"]
         for col in ["Revenue (TZS)", "Profit (TZS)"]:
-            item_summary[col] = item_summary[col].apply(lambda x: f"{safe_float(x):,.0f}")
+            item_summary[col] = item_summary[col].apply(lambda x: fmt_price_only(safe_float(x)))
         st.dataframe(item_summary, use_container_width=True, hide_index=True)
 
     if not expenses_df.empty:
@@ -900,7 +895,7 @@ elif page == "📊 Profit & Summary":
         exp_summary = expenses_df.groupby("category")["amount"].sum().reset_index()
         exp_summary.columns = ["Category", "Total (TZS)"]
         exp_summary = exp_summary.sort_values("Total (TZS)", ascending=False)
-        exp_summary["Total (TZS)"] = exp_summary["Total (TZS)"].apply(lambda x: f"{safe_float(x):,.0f}")
+        exp_summary["Total (TZS)"] = exp_summary["Total (TZS)"].apply(lambda x: fmt_price_only(safe_float(x)))
         st.dataframe(exp_summary, use_container_width=True, hide_index=True)
 
     if sales_df.empty and expenses_df.empty:
@@ -912,28 +907,28 @@ elif page == "📊 Profit & Summary":
 elif page == "🗓️ Calendar View":
     st.title("🗓️ Calendar View")
     st.markdown("---")
-
+    
     sales = load_json(SALES_FILE, [])
     expenses = load_json(EXPENSES_FILE, [])
-
+    
     # Year and Month selection
     col1, col2 = st.columns(2)
     with col1:
         selected_year = st.selectbox("Year", range(2020, 2031), index=date.today().year - 2020, key="calendar_year")
     with col2:
         selected_month = st.selectbox("Month", range(1, 13), index=date.today().month - 1, key="calendar_month")
-
+    
     # Get month name
     month_name = calendar.month_name[selected_month]
     st.subheader(f"{month_name} {selected_year}")
-
+    
     # Create calendar grid
     cal = calendar.monthcalendar(selected_year, selected_month)
-
+    
     # Get records for the month
     month_sales = get_records_by_month(sales, selected_year, selected_month)
     month_expenses = get_records_by_month(expenses, selected_year, selected_month)
-
+    
     # Create a dictionary to organize records by day
     sales_by_day = {}
     for sale in month_sales:
@@ -941,54 +936,54 @@ elif page == "🗓️ Calendar View":
         if day not in sales_by_day:
             sales_by_day[day] = []
         sales_by_day[day].append(sale)
-
+    
     expenses_by_day = {}
     for expense in month_expenses:
         day = int(expense["date"].split("-")[2])
         if day not in expenses_by_day:
             expenses_by_day[day] = []
         expenses_by_day[day].append(expense)
-
+    
     # Display calendar
     days_cols = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     header_cols = st.columns(7)
     for i, day_name in enumerate(days_cols):
         header_cols[i].markdown(f"**{day_name}**")
-
+    
     for week in cal:
         week_cols = st.columns(7)
         for i, day in enumerate(week):
             with week_cols[i]:
                 if day != 0:
                     st.markdown(f"**Day {day}**")
-
+                    
                     # Show sales for this day
                     if day in sales_by_day:
                         total_sales_day = sum(s["total_price"] for s in sales_by_day[day])
                         st.markdown(f"💰 **Sales:** {fmt(total_sales_day)}")
                         st.markdown(f"📦 {len(sales_by_day[day])} transactions")
-
+                    
                     # Show expenses for this day
                     if day in expenses_by_day:
                         total_expenses_day = sum(e["amount"] for e in expenses_by_day[day])
                         st.markdown(f"💸 **Expenses:** {fmt(total_expenses_day)}")
-
+                    
                     # Show net for the day
                     if day in sales_by_day or day in expenses_by_day:
                         day_sales = sum(s["total_price"] for s in sales_by_day.get(day, []))
                         day_expenses = sum(e["amount"] for e in expenses_by_day.get(day, []))
                         day_profit = day_sales - day_expenses
                         st.markdown(f"**Net:** {fmt(day_profit)}")
-
+                    
                     st.markdown("---")
-
+    
     # Summary for the month
     st.subheader(f"📊 {month_name} {selected_year} Summary")
     col1, col2, col3 = st.columns(3)
     total_month_sales = sum(s["total_price"] for s in month_sales)
     total_month_expenses = sum(e["amount"] for e in month_expenses)
     total_month_profit = total_month_sales - total_month_expenses
-
+    
     col1.metric("Total Sales", fmt(total_month_sales))
     col2.metric("Total Expenses", fmt(total_month_expenses))
     col3.metric("Net Profit", fmt(total_month_profit))
@@ -999,28 +994,28 @@ elif page == "🗓️ Calendar View":
 elif page == "⚙️ Data Management":
     st.title("⚙️ Data Management")
     st.markdown("---")
-
+    
     st.warning("⚠️ **Warning:** These actions are permanent and cannot be undone!")
-
+    
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Sales Data", "💸 Expenses Data", "📦 Inventory Data", "📋 Export Data"])
-
+    
     with tab1:
         st.subheader("Sales Data Management")
         sales = load_json(SALES_FILE, [])
         st.write(f"**Current sales records: {len(sales)}**")
-
+        
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Delete All Sales Records", type="secondary", key="delete_all_sales_btn"):
                 st.session_state.confirm_sales_delete = True
-
+        
         with col2:
             if st.button("📊 View Sample", type="primary", key="view_sales_sample"):
                 if sales:
                     st.json(sales[:3])
                 else:
                     st.info("No sales records to display")
-
+        
         if st.session_state.get("confirm_sales_delete", False):
             st.error("⚠️ Are you sure you want to delete ALL sales records?")
             col1, col2 = st.columns(2)
@@ -1034,24 +1029,24 @@ elif page == "⚙️ Data Management":
                 if st.button("❌ No, Cancel", key="cancel_delete_sales"):
                     st.session_state.confirm_sales_delete = False
                     st.rerun()
-
+    
     with tab2:
         st.subheader("Expenses Data Management")
         expenses = load_json(EXPENSES_FILE, [])
         st.write(f"**Current expense records: {len(expenses)}**")
-
+        
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Delete All Expense Records", type="secondary", key="delete_all_expenses_btn"):
                 st.session_state.confirm_expenses_delete = True
-
+        
         with col2:
             if st.button("📊 View Sample", type="primary", key="view_expenses_sample"):
                 if expenses:
                     st.json(expenses[:3])
                 else:
                     st.info("No expense records to display")
-
+        
         if st.session_state.get("confirm_expenses_delete", False):
             st.error("⚠️ Are you sure you want to delete ALL expense records?")
             col1, col2 = st.columns(2)
@@ -1065,15 +1060,15 @@ elif page == "⚙️ Data Management":
                 if st.button("❌ No, Cancel", key="cancel_delete_expenses"):
                     st.session_state.confirm_expenses_delete = False
                     st.rerun()
-
+    
     with tab3:
         st.subheader("Inventory Data Management")
         inventory = load_json(INVENTORY_FILE, {})
         st.write(f"**Current inventory overrides: {len(inventory)} items**")
-
+        
         if st.button("🔄 Reset All Inventory to Default (from Excel)", type="secondary", key="reset_inventory_btn"):
             st.session_state.confirm_inventory_reset = True
-
+        
         if st.session_state.get("confirm_inventory_reset", False):
             st.error("⚠️ Are you sure you want to reset ALL inventory to default values?")
             col1, col2 = st.columns(2)
@@ -1087,13 +1082,13 @@ elif page == "⚙️ Data Management":
                 if st.button("❌ No, Cancel", key="cancel_reset_inventory"):
                     st.session_state.confirm_inventory_reset = False
                     st.rerun()
-
+    
     with tab4:
         st.subheader("Export Data")
-
+        
         sales = load_json(SALES_FILE, [])
         expenses = load_json(EXPENSES_FILE, [])
-
+        
         if sales:
             sales_df = pd.DataFrame(sales)
             csv_sales = sales_df.to_csv(index=False)
@@ -1104,7 +1099,7 @@ elif page == "⚙️ Data Management":
                 mime="text/csv",
                 key="download_sales_csv"
             )
-
+        
         if expenses:
             expenses_df = pd.DataFrame(expenses)
             csv_expenses = expenses_df.to_csv(index=False)
@@ -1115,7 +1110,7 @@ elif page == "⚙️ Data Management":
                 mime="text/csv",
                 key="download_expenses_csv"
             )
-
+        
         # Export combined summary
         if sales or expenses:
             summary_data = {
